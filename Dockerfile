@@ -1,7 +1,8 @@
-FROM node:alpine
+FROM node:18-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+COPY yarn.lock ./
+RUN yarn install
 COPY . .
 EXPOSE 5000
 

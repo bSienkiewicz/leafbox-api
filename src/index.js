@@ -1,7 +1,6 @@
 const express = require("express");
 const cors = require("cors");
 const db = require("./db_utils");
-const clientMQTT = require("./mqtt_utils");
 const bodyParser = require("body-parser");
 const cheerio = require("cheerio");
 const axios = require("axios");
@@ -9,18 +8,19 @@ const Vibrant = require("node-vibrant");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
+const clientMQTT = require("./mqtt_utils");
 
 const pfafURL = "https://pfaf.org/user/Plant.aspx?LatinName=";
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+app.use('/uploads', express.static('uploads'));
 const upload = multer({
   storage: multer.diskStorage({
     destination: "uploads/",
     filename: (req, file, cb) => {
-      
-      console.log('[SRV]\tUPLOADING IMAGE...')
+      console.log("[SRV]\tUPLOADING IMAGE...");
       const ext = path.extname(file.originalname);
       const name = path.basename(file.originalname, ext);
       cb(null, `${Date.now()}${ext}`);
@@ -78,17 +78,15 @@ app.get("/api/devices/:id", async function (req, res) {
 });
 
 app.put("/api/devices/:id", async function (req, res) {
-  const device = await db.updateDevice(req.params.id, req.body);
-  res.status(200).send(device);
+  const response = await db.updateDevice(req.params.id, req.body);
+  await db.getDeviceById(req.params.id).then((device) => {
+    clientMQTT.provideConfig(device[0].mac);
+  });
+  res.status(200).send(response);
 });
 
 app.delete("/api/devices/:id", async function (req, res) {
   const device = await db.deleteDevice(req.params.id);
-  res.status(200).send(device);
-});
-
-app.post("/api/devices", async function (req, res) {
-  const device = await db.addNewDevice(req.body);
   res.status(200).send(device);
 });
 
@@ -111,7 +109,18 @@ app.get("/api/plants", async function (req, res) {
 });
 
 app.put("/api/plants/:id", async function (req, res) {
-  const plant = await db.updatePlant(req.params.id, req.body);
+  await db.updatePlant(req.params.id, req.body);
+  if (req.body.device_id) {
+    const device = await db.getDeviceById(req.body.device_id);
+    if (device) {
+      await db.device_getConfig(device[0].mac).then((config) => {
+        clientMQTT.provideConfig(device[0].mac);
+        console.log(config)
+      });
+    } else {
+      console.log(`No device found with id: ${req.body.device_id}`);
+    }
+  }
   res.status(200).send({ code: 200, message: "Plant updated" });
 });
 
@@ -126,14 +135,13 @@ app.get("/api/plants/:id", async function (req, res) {
 
 app.get("/api/plants/lookup/:search", async function (req, res) {
   const search = req.params.search;
-  try{
-  const results = await db.getPlantInfo(search)
-  res.status(200).send(results);
+  try {
+    const results = await db.getPlantInfo(search);
+    res.status(200).send(results);
   } catch (error) {
     res.status(404).json({ status: 404, message: "Plant not found" });
   }
 });
-
 
 app.get("/api/plants/:id/readings/:ammount", async function (req, res) {
   try {
@@ -197,6 +205,16 @@ app.get("/api/readings/:ammount", async function (req, res) {
   const ammount = req.params.ammount;
   const updates = await db.getReadings(ammount);
   res.status(200).send(updates);
+});
+
+app.get("/api/config/:mac", async function (req, res) {
+  console.log("Providing config for:", decodeURIComponent(req.params.mac));
+  const config = await db.device_getConfig(decodeURIComponent(req.params.mac));
+  if (!config) {
+    res.status(404).send({ error: "Device not found" });
+  } else {
+    res.status(200).send(config);
+  }
 });
 
 app.post("/api/login", function (req, res) {
@@ -263,7 +281,7 @@ app.get("/image/:filename", (req, res) => {
     return res.sendFile(fullfilepath);
   } catch (error) {
     console.error(error);
-    res.status(404).send("Image not found"); 
+    res.status(404).send("Image not found");
   }
 });
 

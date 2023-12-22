@@ -1,19 +1,24 @@
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-let mysql = require("mysql");
-const fs = require('fs');
-require("dotenv").config();
-const removeAccents = require('remove-accents');
+let mysql = require("mysql2");
+const fs = require("fs");
+require("dotenv").config({ path: `.env.${process.env.NODE_ENV}` });
+const removeAccents = require("remove-accents");
+
+console.log("[SRV]\tRunning in", process.env.NODE_ENV, "mode");
 
 var con = mysql.createConnection({
   host: `${process.env.MYSQL_HOST}`,
   user: `${process.env.MYSQL_USER}`,
   password: `${process.env.MYSQL_PASS}`,
+  database: `${process.env.MYSQL_DB}`,
 });
 
 con.connect(function (err) {
   if (err) throw err;
-  console.log(`[SQL]\tConnected to database as ${process.env.MYSQL_USER}`);
+  console.log(
+    `[SQL]\tConnected to database as ${process.env.MYSQL_USER} (${process.env.MYSQL_HOST}:${process.env.MYSQL_PORT})`
+  );
 });
 
 function execute(query, values = []) {
@@ -29,13 +34,38 @@ function execute(query, values = []) {
 }
 
 async function getDevices() {
-  const query = "SELECT * FROM db.devices";
+  const query = "SELECT * FROM devices";
   return execute(query);
 }
 
 async function getDeviceById(id) {
-  const query = `SELECT * FROM db.devices WHERE device_id = ${id}`;
+  const query = `SELECT * FROM devices WHERE device_id = ${id}`;
   return execute(query);
+}
+
+async function getDeviceByMac(mac) {
+  const query = `SELECT * FROM devices WHERE mac = '${mac}'`;
+  return execute(query);
+}
+
+async function changeDeviceStatus(mac, online) {
+  const device = await getDeviceByMac(mac);
+  if (device.length === 0) {
+    console.log(`[MQTT]\tDevice with mac ${mac} not found`);
+    addDevice(mac);
+    return;
+  } else {
+    const query = `UPDATE devices SET online = ${online} WHERE mac = '${mac}'`;
+    return execute(query);
+  }
+}
+
+async function addDevice(mac) {
+  const query = `INSERT INTO devices (device_name, mac, configured)
+  VALUES (?, ?, ?)`;
+  const values = ["New device", mac, 0];
+  console.log(`[MQTT]\tAdding new device with mac ${mac}`);
+  return execute(query, values);
 }
 
 // async function handleDeviceConnected(deviceId, message) {
@@ -45,11 +75,11 @@ async function getDeviceById(id) {
 //       mac: JSON.parse(message.toString()).mac,
 //     };
 //     console.log(device_info);
-//     let device = await xata.db.Devices.read(deviceId);
+//     let device = await xata.Devices.read(deviceId);
 //     if (!device) {
-//       device = await xata.db.Devices.create(device_info);
+//       device = await xata.Devices.create(device_info);
 //     } else {
-//       device = await xata.db.Devices.update(deviceId, {
+//       device = await xata.Devices.update(deviceId, {
 //         last_connected: new Date(),
 //       });
 //       console.log("Logged device connection");
@@ -60,40 +90,44 @@ async function getDeviceById(id) {
 // }
 // TODO: Handle new device connection
 
-async function addNewDevice(body) {
-  const query = `INSERT INTO db.devices (?, ?, ?, ?)`
-  const values = [body.mac, body.type, body.name, 1];
-  return execute(query, values);
-}
 async function updateDevice(deviceId, body) {
-  const query = `UPDATE db.devices SET
+  if (body.location) body.location = removeAccents(body.location);
+  const query = `UPDATE devices SET
     device_name = ?,
     location = ?,
     plant_1 = ?,
     plant_2 = ?,
     plant_3 = ?,
     plant_4 = ?,
+    sensor_config_1 = ?,
+    sensor_config_2 = ?,
+    sensor_config_3 = ?,
+    sensor_config_4 = ?,
     configured = 1
     WHERE device_id = ?`;
   const values = [
     body.device_name,
-    removeAccents(body.location),
+    body.location,
     body.plant_1,
     body.plant_2,
     body.plant_3,
     body.plant_4,
-    deviceId
+    body.sensor_config_1,
+    body.sensor_config_2,
+    body.sensor_config_3,
+    body.sensor_config_4,
+    deviceId,
   ];
   return execute(query, values);
 }
 
 async function deleteDevice(deviceId) {
-  const query = `DELETE FROM db.devices WHERE device_id = ${deviceId}`;
+  const query = `DELETE FROM devices WHERE device_id = ${deviceId}`;
   return execute(query);
 }
 
 async function getDevicesLocations() {
-  const query = `SELECT DISTINCT location AS 'q' FROM db.devices`;
+  const query = `SELECT DISTINCT location AS 'q' FROM devices`;
   return execute(query);
 }
 
@@ -107,21 +141,21 @@ async function getPlants() {
     r.moisture_value AS last_moisture,
     r.timestamp AS last_moisture_ts
   FROM 
-    db.plants AS p
+    plants AS p
   LEFT JOIN (
     SELECT 
         plant_id,
         moisture_value,
         timestamp
     FROM 
-        db.readings
+        readings
     WHERE 
         (plant_id, timestamp) IN (
             SELECT 
                 plant_id,
                 MAX(timestamp)
             FROM 
-                db.readings
+                readings
             GROUP BY 
                 plant_id
         )
@@ -133,19 +167,19 @@ async function getPlantById(id) {
   if (isNaN(id)) {
     throw new Error("Invalid id");
   }
-  const query = `SELECT * FROM db.plants WHERE plant_id = ${id} ORDER BY plant_id`;
+  const query = `SELECT * FROM plants WHERE plant_id = ${id} ORDER BY plant_id`;
   return execute(query);
 }
 
 async function updatePlant(plantId, body) {
-  const query = `UPDATE db.plants SET
+  const query = `UPDATE plants SET
     plant_name = ?,
     image = ?,
     description = ?,
     lower_threshold = ?,
     upper_threshold = ?,
-    watering_time = ?,
-    temperature_min = ?,
+    reading_delay = ?,
+    reading_delay_mult = ?,
     color = ?
     WHERE plant_id = ?`;
   const values = [
@@ -154,10 +188,10 @@ async function updatePlant(plantId, body) {
     body.description,
     body.lower_threshold,
     body.upper_threshold,
-    body.watering_time,
-    body.temperature_min,
-    body.color || '#7f7f7f',
-    plantId
+    body.reading_delay,
+    body.reading_delay_mult,
+    body.color || "#7f7f7f",
+    plantId,
   ];
   return execute(query, values);
 }
@@ -169,22 +203,22 @@ async function getPlantAndReadingsById(id, ammount) {
 
   const plants = await execute(
     `SELECT p.*, 
-      CASE
-        WHEN d.plant_1 = ${id} THEN '1'
-        WHEN d.plant_2 = ${id} THEN '2'
-        WHEN d.plant_3 = ${id} THEN '3'
-        WHEN d.plant_4 = ${id} THEN '4'
-      END AS slot,
-      device.device_name AS device_name,
-      device.device_id as device_id
-    FROM db.plants AS p
-    LEFT JOIN db.devices AS d ON p.plant_id = d.plant_1 OR p.plant_id = d.plant_2 OR p.plant_id = d.plant_3 OR p.plant_id = d.plant_4
-    LEFT JOIN db.devices AS device ON d.device_id = device.device_id
-    WHERE p.plant_id = ${id}`
+    CASE
+      WHEN d.plant_1 = ${id} THEN '1'
+      WHEN d.plant_2 = ${id} THEN '2'
+      WHEN d.plant_3 = ${id} THEN '3'
+      WHEN d.plant_4 = ${id} THEN '4'
+    END AS slot,
+    d.device_name AS device_name,
+    d.device_id as device_id,
+    d.mac as device_mac
+  FROM plants AS p
+  LEFT JOIN devices AS d ON p.plant_id = d.plant_1 OR p.plant_id = d.plant_2 OR p.plant_id = d.plant_3 OR p.plant_id = d.plant_4
+  WHERE p.plant_id = ${id}`
   );
 
   const readings = await execute(
-    `SELECT * FROM db.readings WHERE plant_id = ${id} ORDER BY timestamp DESC LIMIT ${ammount}`
+    `SELECT * FROM readings WHERE plant_id = ${id} ORDER BY timestamp DESC LIMIT ${ammount}`
   );
 
   return {
@@ -194,21 +228,21 @@ async function getPlantAndReadingsById(id, ammount) {
 }
 
 async function getReadings(ammount) {
-  const query = `SELECT readings.*, plants.plant_name FROM db.readings AS readings
-                 LEFT JOIN db.plants AS plants ON readings.plant_id = plants.plant_id
+  const query = `SELECT readings.*, plants.plant_name FROM readings AS readings
+                 LEFT JOIN plants AS plants ON readings.plant_id = plants.plant_id
                  ORDER BY readings.timestamp DESC LIMIT ${ammount}`;
   return execute(query);
 }
 
 async function getPlantsImages() {
-  const query = `SELECT image FROM db.plants`;
+  const query = `SELECT image FROM plants`;
   return execute(query);
 }
 
 async function getLastPlantUpdates(plants) {
   const query = `
     SELECT DISTINCT plant_id, MAX(timestamp) AS last_read
-    FROM db.readings
+    FROM readings
     GROUP BY plant_id
     ORDER BY last_read DESC
     LIMIT ${plants}
@@ -217,24 +251,27 @@ async function getLastPlantUpdates(plants) {
 }
 
 async function addPlant(body) {
-  const query = `INSERT INTO db.plants (plant_name, image, description, species, lower_threshold, upper_threshold, temperature_min, color)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+  console.log(body)
+  const query = `INSERT INTO plants (plant_name, image, description, species, lower_threshold, upper_threshold, reading_delay, reading_delay_mult, color)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
   const values = [
     body.plant_name,
-    body.image || '',
+    body.image || "",
     body.description,
     body.species,
     body.lower_threshold,
     body.upper_threshold,
-    body.temperature_min,
-    body.color || '#7f7f7f'
+    body.reading_delay,
+    body.reading_delay_mult,
+    body.color || "#7f7f7f",
   ];
+  console.log("values:" + values)
   return execute(query, values);
 }
 
 async function deletePlant(plantId) {
-  const deleteReadingsQuery = `DELETE FROM db.readings WHERE plant_id = ${plantId}`;
-  const deletePlantQuery = `DELETE FROM db.plants WHERE plant_id = ${plantId}`;
+  const deleteReadingsQuery = `DELETE FROM readings WHERE plant_id = ${plantId}`;
+  const deletePlantQuery = `DELETE FROM plants WHERE plant_id = ${plantId}`;
   await execute(deleteReadingsQuery);
   return execute(deletePlantQuery);
 }
@@ -246,12 +283,12 @@ async function getPlantsSearch(search) {
     species,
     image
   FROM
-    db.plants
+    plants
   WHERE
     plant_name LIKE '%${search}%' OR
     species LIKE '%${search}%' OR
     plant_id LIKE '%${search}%'
-  `
+  `;
   return execute(query);
 }
 
@@ -263,19 +300,20 @@ async function getDevicesSearch(search) {
     device_name LIKE '%${search}%' OR
     device_id LIKE '%${search}%' OR
   FROM
-    db.devices
-  `
+    devices
+  `;
   return execute(query);
 }
 
 async function addReading(plant_id, reading) {
-  const query = `INSERT INTO db.readings (plant_id, moisture_value) VALUES (?, ?)`;
+  const query = `INSERT INTO readings (plant_id, moisture_value) VALUES (?, ?)`;
   const values = [parseInt(plant_id), parseInt(reading)];
   return execute(query, values);
 }
 
 async function getPlantInfo(search) {
-  const query = `SELECT * FROM plant_info.conditions WHERE latin_name LIKE '%${search}%' OR common_name LIKE '%${search}%' OR edible_parts LIKE '%${search}%'`;
+  console.log("Searching for", search);
+  const query = `SELECT * FROM plant_info WHERE latin_name LIKE '%${search}%' OR common_name LIKE '%${search}%' OR edible_parts LIKE '%${search}%'`;
   return execute(query);
 }
 
@@ -283,7 +321,7 @@ async function getPlantInfo(search) {
 async function loginUser(data) {
   return new Promise((resolve, reject) => {
     con.query(
-      `SELECT * FROM db.users WHERE username = '${data.username}'`,
+      `SELECT * FROM users WHERE username = '${data.username}'`,
       async function (err, result) {
         if (err) {
           reject(err);
@@ -317,7 +355,7 @@ async function loginUser(data) {
 
 async function registerUser(data) {
   try {
-    const query = `INSERT INTO db.users (username, password, name) VALUES (?, ?, ?)`;
+    const query = `INSERT INTO users (username, password, name) VALUES (?, ?, ?)`;
     const values = [data.username, data.password, data.name];
     const result = await execute(query, values);
     return result;
@@ -333,7 +371,7 @@ async function registerUser(data) {
 
 async function checkIfAnyUserRegistered() {
   return new Promise((resolve, reject) => {
-    con.query(`SELECT * FROM db.users`, function (err, result) {
+    con.query(`SELECT * FROM users`, function (err, result) {
       if (err) {
         reject(err);
       } else {
@@ -353,11 +391,10 @@ async function addPlantInfoToDb(data) {
     medicinal_rating = null,
     moisture = null,
     sun = null,
-    min_temperature = null,
     edible_parts = null,
   } = data;
 
-  const query = `INSERT IGNORE INTO plant_info.conditions (latin_name, common_name, usda, hazards, edibility, medicinal, moisture, sun, temperature_min, edible_parts)
+  const query = `INSERT IGNORE INTO conditions (latin_name, common_name, usda, hazards, edibility, medicinal, moisture, sun, temperature_min, edible_parts)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
   const values = [
     latin_name,
@@ -368,19 +405,50 @@ async function addPlantInfoToDb(data) {
     medicinal_rating,
     moisture,
     sun,
-    min_temperature,
+    temperature_min,
     edible_parts,
   ];
-  
+
   return execute(query, values);
+}
+
+async function device_getConfig(mac) {
+  const device = await execute(`SELECT * FROM devices WHERE mac = "${mac}"`);
+  const slots = [1, 2, 3, 4];
+  let result = {};
+
+  if(device.length === 0) {
+    addDevice(mac);
+    return null;
+  }
+  for (let slot of slots) {
+    const plantId = device[0][`plant_${slot}`];
+    if (plantId) {
+      const plant = await execute(`SELECT * FROM plants WHERE plant_id = ${plantId}`);
+      const lastReading = await execute(`SELECT MAX(timestamp) as last_reading FROM readings WHERE plant_id = ${plantId}`);
+      
+      result[slot] = {
+        moistureMin: device[0][`sensor_config_${slot}`].split("|")[0],
+        moistureMax: device[0][`sensor_config_${slot}`].split("|")[1],
+        lowerTreshold: plant[0].lower_threshold,
+        upperTreshold: plant[0].upper_threshold,
+        plantId: plant[0].plant_id,
+        lastReading: lastReading[0].last_reading,
+        readingDelay: plant[0].reading_delay,
+        readingDelayMult: plant[0].reading_delay_mult
+      };
+    }
+  }
+
+  return result;
 }
 
 module.exports = {
   deleteDevice,
   getDevices,
   getDeviceById,
+  getDeviceByMac,
   updateDevice,
-  addNewDevice,
   getDevicesLocations,
   getPlants,
   getReadings,
@@ -398,5 +466,8 @@ module.exports = {
   getPlantInfo,
   registerUser,
   checkIfAnyUserRegistered,
-  addPlantInfoToDb
+  addPlantInfoToDb,
+  changeDeviceStatus,
+  device_getConfig,
+  execute,
 };

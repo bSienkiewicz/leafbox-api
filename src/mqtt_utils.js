@@ -6,14 +6,14 @@ const os = require("os");
 const osu = require("node-os-utils");
 dotenv.config();
 
-const wss = new WebSocket.Server({ port: 5566 });
+const ws = new WebSocket.Server({ port: 5566 });
 
 async function sendServerInfo() {
   const RAMtotal = Math.round(os.totalmem() / 1024 / 1024);
   const RAMfree = Math.round(os.freemem() / 1024 / 1024);
   const CPUusage = await osu.cpu.usage();
 
-  wss.clients.forEach(function each(client) {
+  ws.clients.forEach(function each(client) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(
         JSON.stringify({
@@ -24,7 +24,7 @@ async function sendServerInfo() {
               free: RAMfree,
             },
             cpu: {
-              usage: CPUusage
+              usage: CPUusage,
             },
           },
         })
@@ -35,13 +35,42 @@ async function sendServerInfo() {
 
 setInterval(sendServerInfo, 3000);
 
-wss.on("connection", function connection(ws) {
+ws.on("connection", function connection(socket) {
   console.log("[WSS]\tClient connected");
   sendServerInfo();
 
-  ws.on("message", function incoming(message) {
+  socket.on("message", function incoming(message) {
     console.log("received: %s", message);
-    ws.send("[WSS]\tMessage received: " + message);
+    try {
+      const messageJSON = JSON.parse(message);
+      if (messageJSON.topic === "command") {
+        console.log(messageJSON);
+        sendMQTT(
+          `esp/device/command`,
+          JSON.stringify({
+            type: messageJSON.data.type,
+            mac: messageJSON.data.mac,
+            data: messageJSON.data.data,
+          })
+        );
+      }
+      if (messageJSON.topic === "calibration") {
+        console.log("Sending calibration");
+        sendMQTT(
+          `esp/device/calibration`,
+          JSON.stringify({
+            type: "calibration",
+            mac: messageJSON.data.mac,
+            data: {
+              step: messageJSON.data.step,
+              plant: messageJSON.data.plant,
+            },
+          })
+        );
+      }
+    } catch (err) {
+      console.log(err);
+    }
   });
 });
 
@@ -53,33 +82,64 @@ clientMQTT.on("connect", function () {
   clientMQTT.subscribe("esp/#", function (err) {
     if (!err) {
       console.log("[MQTT]\tConnected to MQTT broker");
-      clientMQTT.publish("esp/device", "Server connected");
     }
   });
 });
 
-clientMQTT.on("message", function (topic, message, packet) {
+clientMQTT.on("message", async function (topic, message, packet) {
   if (packet.retain) return;
   console.log("[MQTT]\tReceived '" + message + "' on '" + topic + "'");
 
   let topicArray = topic.split("/");
-  if (topicArray[0] === "esp" && topicArray[1] === "device") {
-    const deviceId = topicArray[2];
+  if (topicArray[0] === "esp" && topicArray[1] === "status") {
+    const messageJSON = JSON.parse(message);
+    db.changeDeviceStatus(messageJSON.mac, messageJSON.online);
   }
   if (topicArray[0] === "esp" && topicArray[3] === "moisture") {
+    console.log("Adding reading");
     const plant_id = topicArray[2];
-    // console.log("plant_id: " + plant_id + " moisture: " + message)
     db.addReading(plant_id, message);
-    wss.clients.forEach(function each(client) {
+    ws.clients.forEach(function each(client) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(
           JSON.stringify({
-            topic : "moisture",
-            data : {
+            topic: "moisture",
+            data: {
               plant_id: plant_id,
               moisture_value: message,
               timestamp: new Date(),
-            }
+            },
+          })
+        );
+      }
+    });
+  }
+  if (
+    topicArray[0] === "esp" &&
+    topicArray[1] === "device" &&
+    topicArray[2] === "config" &&
+    topicArray[3] === "request"
+  ) {
+    provideConfig(message.toString());
+  }
+  if (
+    topicArray[0] === "esp" &&
+    topicArray[1] === "device" &&
+    topicArray[2] === "calibration"
+  ) {
+    const messageJSON = JSON.parse(message);
+    const device = await db.getDeviceByMac(messageJSON.mac);
+    console.log("XDDDDDDDDDD " + JSON.stringify(device));
+    ws.clients.forEach(function each(client) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(
+          JSON.stringify({
+            topic: "calibration",
+            data: {
+              deviceId: device[0].device_id,
+              socket: messageJSON.socket,
+              values: messageJSON.values,
+            },
           })
         );
       }
@@ -101,6 +161,23 @@ clientMQTT.on("close", function () {
 
 const sendMQTT = (topic, message, retain = false) => {
   clientMQTT.publish(topic, message, { retain: retain });
+};
+
+const provideConfig = (mac) => {
+  db.device_getConfig(mac).then((config) => {
+    console.log("[MQTT]\tProviding config for " + mac);
+    let message = {
+      type: "config",
+      mac: mac,
+      data: config,
+    };
+    sendMQTT(`esp/device/command`, JSON.stringify(message));
+  });
+};
+
+module.exports = {
+  sendMQTT,
+  provideConfig,
 };
 
 /*
