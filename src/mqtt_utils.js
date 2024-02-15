@@ -96,7 +96,7 @@ clientMQTT.on("message", async function (topic, message, packet) {
     db.changeDeviceStatus(messageJSON.mac, messageJSON.online);
   }
   if (topicArray[0] === "esp" && topicArray[3] === "moisture") {
-    console.log("Adding reading");
+    console.log("Adding moisture reading");
     const plant_id = topicArray[2];
     db.addReading(plant_id, message);
     ws.clients.forEach(function each(client) {
@@ -114,12 +114,32 @@ clientMQTT.on("message", async function (topic, message, packet) {
       }
     });
   }
+  if (topicArray[0] === "esp" && topicArray[3] === "temperature") {
+    console.log("Adding temperature reading");
+    const id = topicArray[2];
+    db.addTemperatureReading(id, message);
+    ws.clients.forEach(function each(client) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(
+          JSON.stringify({
+            topic: "temperature",
+            data: {
+              device_id: id,
+              temperature_value: message,
+              timestamp: new Date(),
+            },
+          })
+        );
+      }
+    });
+  }
   if (
     topicArray[0] === "esp" &&
     topicArray[1] === "device" &&
     topicArray[2] === "config" &&
     topicArray[3] === "request"
   ) {
+    console.log("Providing config");
     provideConfig(message.toString());
   }
   if (
@@ -129,7 +149,6 @@ clientMQTT.on("message", async function (topic, message, packet) {
   ) {
     const messageJSON = JSON.parse(message);
     const device = await db.getDeviceByMac(messageJSON.mac);
-    console.log("XDDDDDDDDDD " + JSON.stringify(device));
     ws.clients.forEach(function each(client) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(
@@ -164,12 +183,13 @@ const sendMQTT = (topic, message, retain = false) => {
 };
 
 const provideConfig = (mac) => {
-  db.device_getConfig(mac).then((config) => {
+  db.device_getConfig(mac).then((result) => {
     console.log("[MQTT]\tProviding config for " + mac);
     let message = {
       type: "config",
       mac: mac,
-      data: config,
+      id: result.deviceId,
+      data: result.config,
     };
     sendMQTT(`esp/device/command`, JSON.stringify(message));
   });

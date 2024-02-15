@@ -78,6 +78,7 @@ app.get("/api/devices/:id", async function (req, res) {
 });
 
 app.put("/api/devices/:id", async function (req, res) {
+  console.log("UPDATING DEVICE IN INDEX");
   const response = await db.updateDevice(req.params.id, req.body);
   await db.getDeviceById(req.params.id).then((device) => {
     clientMQTT.provideConfig(device[0].mac);
@@ -115,7 +116,6 @@ app.put("/api/plants/:id", async function (req, res) {
     if (device) {
       await db.device_getConfig(device[0].mac).then((config) => {
         clientMQTT.provideConfig(device[0].mac);
-        console.log(config)
       });
     } else {
       console.log(`No device found with id: ${req.body.device_id}`);
@@ -156,6 +156,7 @@ app.get("/api/plants/:id/readings/:ammount", async function (req, res) {
 });
 
 app.post("/api/plants", async function (req, res) {
+  console.log(req.body)
   const plant = await db.addPlant(req.body);
   res.status(200).send(plant);
 });

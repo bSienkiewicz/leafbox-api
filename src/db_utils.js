@@ -91,6 +91,7 @@ async function addDevice(mac) {
 // TODO: Handle new device connection
 
 async function updateDevice(deviceId, body) {
+  console.log("UPDATING DEVICE")
   if (body.location) body.location = removeAccents(body.location);
   const query = `UPDATE devices SET
     device_name = ?,
@@ -103,6 +104,12 @@ async function updateDevice(deviceId, body) {
     sensor_config_2 = ?,
     sensor_config_3 = ?,
     sensor_config_4 = ?,
+    sensor_type_1 = ?,
+    sensor_type_2 = ?,
+    sensor_type_3 = ?,
+    sensor_type_4 = ?,
+    pump = ?,
+    pump_efficiency = ?,
     configured = 1
     WHERE device_id = ?`;
   const values = [
@@ -116,6 +123,12 @@ async function updateDevice(deviceId, body) {
     body.sensor_config_2,
     body.sensor_config_3,
     body.sensor_config_4,
+    body.sensor_type_1,
+    body.sensor_type_2,
+    body.sensor_type_3,
+    body.sensor_type_4,
+    body.pump,
+    body.pump_efficiency,
     deviceId,
   ];
   return execute(query, values);
@@ -137,28 +150,37 @@ async function getDevicesLocations() {
 
 async function getPlants() {
   const query = `SELECT DISTINCT
-    p.*,
-    r.moisture_value AS last_moisture,
-    r.timestamp AS last_moisture_ts
+  p.*,
+  r.moisture_value AS last_moisture,
+  r.timestamp AS last_moisture_ts
   FROM 
-    plants AS p
+  plants AS p
   LEFT JOIN (
-    SELECT 
-        plant_id,
-        moisture_value,
-        timestamp
-    FROM 
-        readings
-    WHERE 
-        (plant_id, timestamp) IN (
-            SELECT 
-                plant_id,
-                MAX(timestamp)
-            FROM 
-                readings
-            GROUP BY 
-                plant_id
+  SELECT 
+    r1.plant_id,
+    r1.moisture_value,
+    r1.timestamp
+  FROM 
+    readings AS r1
+  WHERE 
+    r1.reading_id IN (
+      SELECT 
+        MAX(r2.reading_id)
+      FROM 
+        readings AS r2
+      WHERE 
+        (r2.plant_id, r2.timestamp) IN (
+          SELECT 
+            r3.plant_id,
+            MAX(r3.timestamp)
+          FROM 
+            readings AS r3
+          GROUP BY 
+            r3.plant_id
         )
+      GROUP BY 
+        r2.plant_id, r2.timestamp
+    )
   ) AS r ON p.plant_id = r.plant_id;`;
   return execute(query);
 }
@@ -172,6 +194,7 @@ async function getPlantById(id) {
 }
 
 async function updatePlant(plantId, body) {
+  console.log(body)
   const query = `UPDATE plants SET
     plant_name = ?,
     image = ?,
@@ -180,6 +203,8 @@ async function updatePlant(plantId, body) {
     upper_threshold = ?,
     reading_delay = ?,
     reading_delay_mult = ?,
+    watering = ?,
+    ml_per_pump = ?,
     color = ?
     WHERE plant_id = ?`;
   const values = [
@@ -190,6 +215,8 @@ async function updatePlant(plantId, body) {
     body.upper_threshold,
     body.reading_delay,
     body.reading_delay_mult,
+    body.watering,
+    body.ml_per_pump,
     body.color || "#7f7f7f",
     plantId,
   ];
@@ -251,7 +278,6 @@ async function getLastPlantUpdates(plants) {
 }
 
 async function addPlant(body) {
-  console.log(body)
   const query = `INSERT INTO plants (plant_name, image, description, species, lower_threshold, upper_threshold, reading_delay, reading_delay_mult, color)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
   const values = [
@@ -265,7 +291,6 @@ async function addPlant(body) {
     body.reading_delay_mult,
     body.color || "#7f7f7f",
   ];
-  console.log("values:" + values)
   return execute(query, values);
 }
 
@@ -311,8 +336,13 @@ async function addReading(plant_id, reading) {
   return execute(query, values);
 }
 
+async function addTemperatureReading(device_mac, reading) {
+  const query = `UPDATE devices SET temperature = ? WHERE mac = ?`;
+  const values = [parseFloat(reading), device_mac];
+  return execute(query, values);
+}
+
 async function getPlantInfo(search) {
-  console.log("Searching for", search);
   const query = `SELECT * FROM plant_info WHERE latin_name LIKE '%${search}%' OR common_name LIKE '%${search}%' OR edible_parts LIKE '%${search}%'`;
   return execute(query);
 }
@@ -421,13 +451,17 @@ async function device_getConfig(mac) {
     addDevice(mac);
     return null;
   }
+
   for (let slot of slots) {
     const plantId = device[0][`plant_${slot}`];
-    if (plantId) {
+    const sensorType = device[0][`sensor_type_${slot}`];
+
+    if (plantId && sensorType === "soil") {
       const plant = await execute(`SELECT * FROM plants WHERE plant_id = ${plantId}`);
       const lastReading = await execute(`SELECT MAX(timestamp) as last_reading FROM readings WHERE plant_id = ${plantId}`);
       
       result[slot] = {
+        sensorType: device[0][`sensor_type_${slot}`],
         moistureMin: device[0][`sensor_config_${slot}`].split("|")[0],
         moistureMax: device[0][`sensor_config_${slot}`].split("|")[1],
         lowerTreshold: plant[0].lower_threshold,
@@ -438,9 +472,17 @@ async function device_getConfig(mac) {
         readingDelayMult: plant[0].reading_delay_mult
       };
     }
+    else if (sensorType === "temperature") {
+      result[slot] = {
+        sensorType: device[0][`sensor_type_${slot}`],
+      }
+    }
   }
 
-  return result;
+  return {
+    config: result,
+    deviceId: device[0].device_id
+  };
 }
 
 module.exports = {
@@ -462,6 +504,7 @@ module.exports = {
   addPlant,
   deletePlant,
   addReading,
+  addTemperatureReading,
   loginUser,
   getPlantInfo,
   registerUser,
